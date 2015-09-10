@@ -1,55 +1,53 @@
-FROM java:8-jdk
+FROM ubuntu:12.04
+MAINTAINER Siddharth, Ram < gsiddharth@paypal.com>
 
-RUN apt-get update && apt-get install -y wget git curl zip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y && apt-get install --no-install-recommends -y -q curl build-essential python2.7 python2.7-dev python-pip git software-properties-common python-software-properties
+RUN add-apt-repository ppa:webupd8team/java
+RUN echo oracle-java8-installer shared/accepted-oracle-license-v1-1 select true | /usr/bin/debconf-set-selections
+RUN apt-get update
+RUN apt-get install -y -q oracle-java8-installer
+RUN apt-get install oracle-java8-set-default
 
-ENV JENKINS_HOME /var/jenkins_home
-ENV JENKINS_SLAVE_AGENT_PORT 50000
+# http://bugs.python.org/issue19846
+# > At the moment, setting "LANG=C" on a Linux system *fundamentally breaks Python 3*, and that's not OK.
+ENV LANG C.UTF-8
+# gpg: key 18ADD4FF: public key "Benjamin Peterson <benjamin@python.org>" imported
+#RUN gpg --keyserver ha.pool.sks-keyservers.net --recv-keys C01E1CAD5EA2C4F0B8E3571504C367C218ADD4FF
+#ENV PYTHON_VERSION 2.7.10
+# if this is called "PIP_VERSION", pip explodes with "ValueError: invalid truth value '<VERSION>'"
+#ENV PYTHON_PIP_VERSION 7.1.2
+RUN set -x \
+	&& mkdir -p /usr/src/python \
+	&& curl -SL "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" -o python.tar.xz \
+	&& curl -SL "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz.asc" -o python.tar.xz.asc \
+	&& gpg --verify python.tar.xz.asc \
+	&& tar -xJC /usr/src/python --strip-components=1 -f python.tar.xz \
+	&& rm python.tar.xz* \
+	&& cd /usr/src/python \
+	&& ./configure --enable-shared --enable-unicode=ucs4 \
+	&& make -j$(nproc) \
+	&& make install \
+	&& ldconfig \
+	&& curl -SL 'https://bootstrap.pypa.io/get-pip.py' | python2 \
+	&& pip install --no-cache-dir --upgrade pip==$PYTHON_PIP_VERSION \
+	&& find /usr/local \
+		\( -type d -a -name test -o -name tests \) \
+		-o \( -type f -a -name '*.pyc' -o -name '*.pyo' \) \
+		-exec rm -rf '{}' + \
+	&& rm -rf /usr/src/python
 
-# Jenkins is ran with user `jenkins`, uid = 1000
-# If you bind mount a volume from host/volume from a data container, 
-# ensure you use same uid
-RUN useradd -d "$JENKINS_HOME" -u 1000 -m -s /bin/bash jenkins
-
-# Jenkins home directoy is a volume, so configuration and build history 
-# can be persisted and survive image upgrades
-VOLUME /var/jenkins_home
-
-# `/usr/share/jenkins/ref/` contains all reference configuration we want 
-# to set on a fresh new installation. Use it to bundle additional plugins 
-# or config file with your custom jenkins Docker image.
-RUN mkdir -p /usr/share/jenkins/ref/init.groovy.d
-
-ENV TINI_SHA 066ad710107dc7ee05d3aa6e4974f01dc98f3888
-
-# Use tini as subreaper in Docker container to adopt zombie processes 
-RUN curl -fL https://github.com/krallin/tini/releases/download/v0.5.0/tini-static -o /bin/tini && chmod +x /bin/tini \
-  && echo "$TINI_SHA /bin/tini" | sha1sum -c -
-
-COPY init.groovy /usr/share/jenkins/ref/init.groovy.d/tcp-slave-agent-port.groovy
-
-ENV JENKINS_VERSION 1.609.3
-ENV JENKINS_SHA f5ad5f749c759da7e1a18b96be5db974f126b71e
-
-# could use ADD but this one does not check Last-Modified header 
-# see https://github.com/docker/docker/issues/8331
-RUN curl -fL http://mirrors.jenkins-ci.org/war-stable/$JENKINS_VERSION/jenkins.war -o /usr/share/jenkins/jenkins.war \
-  && echo "$JENKINS_SHA /usr/share/jenkins/jenkins.war" | sha1sum -c -
-
-ENV JENKINS_UC https://updates.jenkins-ci.org
-RUN chown -R jenkins "$JENKINS_HOME" /usr/share/jenkins/ref
-
-# for main web interface:
+# install "virtualenv", since the vast majority of users of this image will want it
+RUN pip install --no-cache-dir virtualenv
+RUN apt-get install -y curl
+RUN apt-get -y install build-essential python-dev python-boto libcurl4-nss-dev libsasl2-dev maven libapr1-dev libsvn-dev
+RUN curl http://pkg.jenkins-ci.org/debian/jenkins-ci.org.key | apt-key add -
+RUN echo deb http://archive.ubuntu.com/ubuntu precise universe >> /etc/apt/sources.list
+RUN echo deb http://pkg.jenkins-ci.org/debian binary/ > /etc/apt/sources.list.d/jenkins.list
+RUN apt-get update
+# HACK: https://issues.jenkins-ci.org/browse/JENKINS-20407
+RUN mkdir /var/run/jenkins
+RUN apt-get install -y --force-yes jenkins
+ADD run /usr/local/bin/
 EXPOSE 8080
-
-# will be used by attached slave agents:
-EXPOSE 50000
-
-ENV COPY_REFERENCE_FILE_LOG $JENKINS_HOME/copy_reference_file.log
-
-USER jenkins
-
-COPY jenkins.sh /usr/local/bin/jenkins.sh
-ENTRYPOINT ["/bin/tini", "--", "/usr/local/bin/jenkins.sh"]
-
-# from a derived Dockerfile, can use `RUN plugin.sh active.txt` to setup /usr/share/jenkins/ref/plugins from a support bundle
-COPY plugins.sh /usr/local/bin/plugins.sh
+VOLUME ["/var/lib/jenkins"]
+CMD ["/usr/local/bin/run"]
